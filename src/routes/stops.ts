@@ -1,45 +1,57 @@
 import { Router } from 'express';
-import { findStop, routesServing, stops } from '../data/network.js';
+import { arrivalsAt } from '../data/arrivals.js';
+import {
+  countStops,
+  findStop,
+  pageStops,
+  searchStops,
+  servicesServing,
+  stopsNear,
+} from '../data/graph.js';
 import { HttpError } from '../middleware/errors.js';
-import type { Arrival } from '../types.js';
+import { coordinatePair, intParam, optionalString } from '../query.js';
 
 export const stopsRouter: Router = Router();
 
-const MAX_ARRIVALS = 10;
+const DEFAULT_LIMIT = 50;
+const MAX_LIMIT = 200;
+const DEFAULT_RADIUS_M = 500;
+const MAX_RADIUS_M = 5000;
 
 /**
- * Predict the next departures at a stop.
+ * GET /stops
+ *   ?near=lat,lon&radius=500   stops around a point, nearest first
+ *   ?q=lavender                free-text over id, name and road
+ *   ?offset=0&limit=50         otherwise, a page of the whole list
  *
- * The seed network has no live vehicle feed, so arrivals are derived from each
- * route's headway: buses are assumed to run on an even cadence from the top of
- * the hour. Replace this with the real AVL feed when one is available.
+ * Singapore has over 5,000 stops, so this never returns all of them at once.
  */
-function predictArrivals(stopId: string, limit: number): Arrival[] {
-  const now = new Date();
-  const minutesIntoHour = now.getMinutes() + now.getSeconds() / 60;
+stopsRouter.get('/stops', (req, res) => {
+  const limit = intParam(req.query['limit'], 'limit', DEFAULT_LIMIT, 1, MAX_LIMIT);
+  const near = optionalString(req.query['near'], 'near');
+  const q = optionalString(req.query['q'], 'q');
 
-  const arrivals = routesServing(stopId).flatMap((route) => {
-    const sinceLast = minutesIntoHour % route.headwayMinutes;
-    const first = route.headwayMinutes - sinceLast;
+  if (near !== undefined && q !== undefined) {
+    throw new HttpError(400, 'Use either near or q, not both');
+  }
 
-    return Array.from({ length: limit }, (_unused, i) => {
-      const minutesAway = first + i * route.headwayMinutes;
-      return {
-        routeId: route.id,
-        routeShortName: route.shortName,
-        stopId,
-        arrivesAt: new Date(now.getTime() + minutesAway * 60_000).toISOString(),
-        minutesAway: Math.round(minutesAway),
-      } satisfies Arrival;
-    });
-  });
+  if (near !== undefined) {
+    const { lat, lon } = coordinatePair(near, 'near');
+    const radius = intParam(req.query['radius'], 'radius', DEFAULT_RADIUS_M, 1, MAX_RADIUS_M);
+    const stops = stopsNear(lat, lon, radius, limit);
+    res.json({ total: countStops(), count: stops.length, radiusMetres: radius, stops });
+    return;
+  }
 
-  return arrivals.sort((a, b) => a.minutesAway - b.minutesAway).slice(0, limit);
-}
+  if (q !== undefined) {
+    const stops = searchStops(q, limit);
+    res.json({ total: countStops(), count: stops.length, query: q, stops });
+    return;
+  }
 
-/** GET /stops — every stop. */
-stopsRouter.get('/stops', (_req, res) => {
-  res.json({ stops });
+  const offset = intParam(req.query['offset'], 'offset', 0, 0, 1_000_000);
+  const stops = pageStops(offset, limit);
+  res.json({ total: countStops(), count: stops.length, offset, stops });
 });
 
 /** GET /stops/:stopId */
@@ -47,23 +59,36 @@ stopsRouter.get('/stops/:stopId', (req, res) => {
   const stop = findStop(req.params.stopId);
   if (!stop) throw new HttpError(404, `Unknown stop "${req.params.stopId}"`);
 
-  res.json({ ...stop, routes: routesServing(stop.id).map((route) => route.id) });
+  res.json({ ...stop, services: servicesServing(stop.id) });
 });
 
-/** GET /stops/:stopId/arrivals?limit=5 */
-stopsRouter.get('/stops/:stopId/arrivals', (req, res) => {
+/**
+ * GET /stops/:stopId/arrivals?service=141
+ *
+ * Live predictions. Times move between calls; that is the point.
+ */
+stopsRouter.get('/stops/:stopId/arrivals', (req, res, next) => {
   const stop = findStop(req.params.stopId);
   if (!stop) throw new HttpError(404, `Unknown stop "${req.params.stopId}"`);
 
-  const raw = req.query['limit'];
-  let limit = 5;
-  if (raw !== undefined) {
-    if (typeof raw !== 'string') throw new HttpError(400, 'limit must be a single value');
-    limit = Number(raw);
-    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_ARRIVALS) {
-      throw new HttpError(400, `limit must be an integer between 1 and ${MAX_ARRIVALS}`);
-    }
-  }
+  const service = optionalString(req.query['service'], 'service');
 
-  res.json({ stopId: stop.id, arrivals: predictArrivals(stop.id, limit) });
+  arrivalsAt(stop.id)
+    .then((all) => {
+      const arrivals = service
+        ? all.filter((a) => a.service.toUpperCase() === service.toUpperCase())
+        : all;
+
+      if (service && arrivals.length === 0 && !servicesServing(stop.id).includes(service)) {
+        throw new HttpError(404, `Service "${service}" does not call at stop ${stop.id}`);
+      }
+
+      res.json({
+        stop: { id: stop.id, name: stop.name, road: stop.road },
+        fetchedAt: new Date().toISOString(),
+        count: arrivals.length,
+        arrivals,
+      });
+    })
+    .catch(next);
 });
