@@ -18,6 +18,14 @@ function urlFromEnv(name: string, fallback: string): string {
   }
 }
 
+function listFromEnv(name: string, fallback: string[]): string[] {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const items = raw.split(',').map((s) => s.trim()).filter((s) => s !== '');
+  if (items.length === 0) throw new Error(`${name} must list at least one origin`);
+  return items;
+}
+
 export const config = {
   port: intFromEnv('PORT', 3000, 1, 65535),
   env: process.env['NODE_ENV'] ?? 'development',
@@ -34,4 +42,7 @@ export const config = {
   arrivalsTtlMs: intFromEnv('ARRIVALS_TTL_MS', 15_000, 1_000, 300_000),
   graphRefreshMs: intFromEnv('GRAPH_REFRESH_MS', 24 * 60 * 60 * 1000, 60_000, 7 * 24 * 60 * 60 * 1000),
   upstreamTimeoutMs: intFromEnv('UPSTREAM_TIMEOUT_MS', 8_000, 500, 60_000),
+
+  /** Origins allowed to call this API from a browser; "*" for any. */
+  corsOrigins: listFromEnv('CORS_ORIGINS', ['*']),
 } as const;

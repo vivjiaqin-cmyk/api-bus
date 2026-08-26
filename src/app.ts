@@ -1,4 +1,5 @@
 import express, { type Express } from 'express';
+import { cors } from './middleware/cors.js';
 import { errorHandler, notFound } from './middleware/errors.js';
 import { requireGraph } from './middleware/ready.js';
 import { healthRouter } from './routes/health.js';
@@ -9,6 +10,7 @@ export function createApp(): Express {
   const app = express();
 
   app.disable('x-powered-by');
+  app.use(cors);
   app.use(express.json());
 
   app.get('/', (_req, res) => {
